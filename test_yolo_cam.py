@@ -33,7 +33,7 @@ def allocate_buffers(engine):
 
 def main():
     # PATH ENGINE: Pastikan file yolov8n_fp16.engine ada di folder yang sama
-    ENGINE_PATH = "yolov8n_fp16.engine"
+    ENGINE_PATH = "yolov8n_416_fp16.engine"
     
     print("[INFO] Memuat model TensorRT ke VRAM GPU...")
     engine = load_engine(ENGINE_PATH)
@@ -42,7 +42,14 @@ def main():
     print("[INFO] Model siap digunakan.")
 
     # Inisialisasi Kamera (0 untuk USB Webcam standar)
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
+    
+    # Paksa format kompresi MJPG (mengurangi beban decoding bandwidth memori)
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+    
+    # Paksa resolusi hardware kamera diturunkan ke ukuran standar ringan
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     
     if not cap.isOpened():
         print("[ERROR] Kamera tidak terdeteksi. Pastikan kamera terpasang.")
@@ -59,8 +66,8 @@ def main():
         orig_h, orig_w = frame.shape[:2]
 
         # --- 1. PRE-PROCESSING ---
-        # YOLOv8 meminta input berukuran 640x640, format RGB, dinormalisasi 0-1
-        img = cv2.resize(frame, (640, 640))
+        # YOLOv8 meminta input berukuran 416x416, format RGB, dinormalisasi 0-1
+        img = cv2.resize(frame, (416, 416))
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img = img.astype(np.float32) / 255.0
         # Mengubah struktur matriks dari [Height, Width, Channels] ke [Channels, Height, Width]
@@ -81,34 +88,48 @@ def main():
         # --- 3. POST-PROCESSING ---
         # Output YOLOv8 adalah tensor berukuran [1, 84, 8400]
         # Kita ubah bentuknya agar lebih mudah diproses menjadi 8400 baris (prediksi) x 84 kolom (data)
-        output_data = outputs[0]['host'].reshape(84, 8400).transpose()
+        output_data = outputs[0]['host'].reshape(84, 3549).transpose()
 
         boxes = []
         scores = []
         class_ids = []
 
         # Faktor skala untuk mengembalikan ukuran bounding box ke resolusi asli kamera
-        x_factor = orig_w / 640.0
-        y_factor = orig_h / 640.0
+        x_factor = orig_w / 416.0
+        y_factor = orig_h / 416.0
 
-        for row in output_data:
-            prob = row[4:] # Kolom ke-4 sampai akhir adalah nilai probabilitas setiap kelas
-            max_prob = np.max(prob)
+        output_data = outputs[0]['host'].reshape(84, 3549).transpose()
+
+        # Pisahkan matriks koordinat (kolom 0-3) dan matriks probabilitas (kolom 4-83)
+        boxes_data = output_data[:, :4]
+        probs_data = output_data[:, 4:]
+
+        # Ambil nilai probabilitas tertinggi dan index kelasnya secara paralel untuk 3549 baris
+        scores_array = np.max(probs_data, axis=1)
+        class_ids_array = np.argmax(probs_data, axis=1)
+
+        # Cari HANYA index matriks yang nilai kepercayaannya > 0.5
+        valid_indices = np.where(scores_array > 0.5)[0]
+
+        boxes = []
+        scores = []
+        class_ids = []
+
+        x_factor = orig_w / 416.0
+        y_factor = orig_h / 416.0
+
+        # Looping Python sekarang HANYA berjalan 1-5 kali (sesuai jumlah objek yang terdeteksi), BUKAN 3549 kali.
+        for i in valid_indices:
+            cx, cy, w, h = boxes_data[i]
             
-            # Filter deteksi yang nilai kepercayaannya di atas 50%
-            if max_prob > 0.5: 
-                class_id = np.argmax(prob)
-                cx, cy, w, h = row[0], row[1], row[2], row[3]
-                
-                # Konversi koordinat tengah ke koordinat sudut kiri atas
-                left = int((cx - w/2) * x_factor)
-                top = int((cy - h/2) * y_factor)
-                width = int(w * x_factor)
-                height = int(h * y_factor)
-                
-                boxes.append([left, top, width, height])
-                scores.append(float(max_prob))
-                class_ids.append(class_id)
+            left = int((cx - w/2) * x_factor)
+            top = int((cy - h/2) * y_factor)
+            width = int(w * x_factor)
+            height = int(h * y_factor)
+            
+            boxes.append([left, top, width, height])
+            scores.append(float(scores_array[i]))
+            class_ids.append(int(class_ids_array[i]))
 
         # --- 4. NON-MAXIMUM SUPPRESSION (NMS) ---
         # Menghapus kotak duplikat yang tumpang tindih pada objek yang sama

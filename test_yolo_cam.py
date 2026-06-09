@@ -63,74 +63,60 @@ class CameraStream:
         self.cap.release()
 
 def main():
-    # PATH ENGINE: Pastikan file yolov8n_fp16.engine ada di folder yang sama
+    # PATH ENGINE: Pastikan file yolov8n_416_fp16.engine ada di folder yang sama
     ENGINE_PATH = "yolov8n_416_fp16.engine"
     
     print("[INFO] Memuat model TensorRT ke VRAM GPU...")
     engine = load_engine(ENGINE_PATH)
     context = engine.create_execution_context()
+    # Variabel 'stream' di sini adalah objek antrean CUDA (CUDA Stream)
     inputs, outputs, bindings, stream = allocate_buffers(engine)
     print("[INFO] Model siap digunakan.")
 
-    # Inisialisasi Kamera (0 untuk USB Webcam standar)
-    print("Menyalakan Thread Kamera...")
-    stream = CameraStream(0).start()
-    time.sleep(1.0)
+    # Inisialisasi Kamera (Gunakan variabel baru 'cam_stream')
+    print("[INFO] Menyalakan Thread Kamera...")
+    cam_stream = CameraStream(0).start()
+    time.sleep(1.0) # Memberi waktu buffer kamera terisi
 
-    if not stream.ret:
-        print('Kamera not Detected')
+    if not cam_stream.ret:
+        print('[ERROR] Kamera tidak terdeteksi.')
         return
 
     print("[INFO] Memulai inferensi real-time. Tekan 'q' untuk keluar.")
     
     while True:
         start_time = time.time()
-        ret, frame = stream.read()
+        
+        # Ambil frame dari thread kamera
+        ret, frame = cam_stream.read()
         if not ret: 
             break
 
         orig_h, orig_w = frame.shape[:2]
 
         # --- 1. PRE-PROCESSING ---
-        # YOLOv8 meminta input berukuran 416x416, format RGB, dinormalisasi 0-1
         img = cv2.resize(frame, (416, 416))
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img = img.astype(np.float32) / 255.0
-        # Mengubah struktur matriks dari [Height, Width, Channels] ke [Channels, Height, Width]
         img = np.transpose(img, (2, 0, 1))
-        # Meratakan array untuk dimasukkan ke memori CUDA
         img = np.expand_dims(img, axis=0).ravel()
 
         # --- 2. INFERENSI CUDA ---
-        # Copy gambar dari RAM CPU ke VRAM GPU
+        # Di sini kita murni menggunakan 'stream' milik CUDA, bukan kamera
         np.copyto(inputs[0]['host'], img)
         cuda.memcpy_htod_async(inputs[0]['device'], inputs[0]['host'], stream)
-        # Eksekusi model
         context.execute_async_v2(bindings=bindings, stream_handle=stream.handle)
-        # Copy hasil dari VRAM GPU kembali ke RAM CPU
         cuda.memcpy_dtoh_async(outputs[0]['host'], outputs[0]['device'], stream)
         stream.synchronize()
 
-        # --- 3. POST-PROCESSING ---
-        # Output YOLOv8 adalah tensor berukuran [1, 84, 8400]
-        # Kita ubah bentuknya agar lebih mudah diproses menjadi 8400 baris (prediksi) x 84 kolom (data)
-        output_data = outputs[0]['host'].reshape(84, 3549).transpose()
-
-        boxes = []
-        scores = []
-        class_ids = []
-
-        # Faktor skala untuk mengembalikan ukuran bounding box ke resolusi asli kamera
-        x_factor = orig_w / 416.0
-        y_factor = orig_h / 416.0
-
+        # --- 3. POST-PROCESSING (Telah dibersihkan dari duplikasi) ---
         output_data = outputs[0]['host'].reshape(84, 3549).transpose()
 
         # Pisahkan matriks koordinat (kolom 0-3) dan matriks probabilitas (kolom 4-83)
         boxes_data = output_data[:, :4]
         probs_data = output_data[:, 4:]
 
-        # Ambil nilai probabilitas tertinggi dan index kelasnya secara paralel untuk 3549 baris
+        # Ambil nilai probabilitas tertinggi dan index kelasnya secara paralel
         scores_array = np.max(probs_data, axis=1)
         class_ids_array = np.argmax(probs_data, axis=1)
 
@@ -144,7 +130,6 @@ def main():
         x_factor = orig_w / 416.0
         y_factor = orig_h / 416.0
 
-        # Looping Python sekarang HANYA berjalan 1-5 kali (sesuai jumlah objek yang terdeteksi), BUKAN 3549 kali.
         for i in valid_indices:
             cx, cy, w, h = boxes_data[i]
             
@@ -158,7 +143,6 @@ def main():
             class_ids.append(int(class_ids_array[i]))
 
         # --- 4. NON-MAXIMUM SUPPRESSION (NMS) ---
-        # Menghapus kotak duplikat yang tumpang tindih pada objek yang sama
         indices = cv2.dnn.NMSBoxes(boxes, scores, 0.5, 0.45)
 
         # --- 5. VISUALISASI ---
@@ -167,27 +151,24 @@ def main():
                 box = boxes[i]
                 left, top, w, h = box[0], box[1], box[2], box[3]
                 
-                # Gambar kotak
                 cv2.rectangle(frame, (left, top), (left + w, top + h), (0, 255, 0), 2)
-                
-                # Tulis label kelas dan persentase
                 label = f"{CLASSES[class_ids[i]]}: {scores[i]:.2f}"
                 cv2.putText(frame, label, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-        # Kalkulasi dan tampilkan FPS
+        # Kalkulasi FPS
         fps = 1.0 / (time.time() - start_time)
         cv2.putText(frame, f"FPS: {fps:.1f} (TensorRT FP16)", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
 
-        # Tampilkan output
         cv2.imshow("YOLOv8 Murni Jetson Nano", frame)
         
-        # Tekan 'q' untuk keluar
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
-    # Bersihkan memori kamera dan tutup jendela GUI
-    stream.stop()
+    # Bersihkan memori kamera dan tutup jendela
+    cam_stream.stop()
     cv2.destroyAllWindows()
 
+if __name__ == '__main__':
+    main()
 if __name__ == '__main__':
     main()

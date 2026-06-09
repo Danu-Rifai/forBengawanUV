@@ -74,7 +74,7 @@ def main():
 
     # Inisialisasi Kamera (0 untuk USB Webcam standar)
     print("Menyalakan Thread Kamera...")
-    stream = CameraStream(0).start
+    stream = CameraStream(0).start()
     time.sleep(1.0)
 
     if not stream.ret:

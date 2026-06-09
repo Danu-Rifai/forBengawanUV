@@ -3,6 +3,7 @@ import numpy as np
 import tensorrt as trt
 import pycuda.driver as cuda
 import pycuda.autoinit
+import threading
 import time
 
 # 80 Kelas standar COCO Dataset
@@ -31,6 +32,36 @@ def allocate_buffers(engine):
             outputs.append({'host': host_mem, 'device': device_mem})
     return inputs, outputs, bindings, stream
 
+class CameraStream:
+    def __init__(self, src=0):
+        self.cap = cv2.VideoCapture(src, cv2.CAP_V4L2)
+        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+        self.ret, self.frame = self.cap.read()
+        self.stopped = False
+        self.lock = threading.Lock()
+
+    def start(self):
+        threading.Thread(target=self.update, daemon=True).start()
+        return self
+    
+    def update(self):
+        while not self.stopped:
+            ret, frame = self.cap.read()
+            with self.lock:
+                self.ret = ret
+                self.frame = frame
+
+    def read(self):
+        with self.lock:
+            return self.ret, self.frame.copy() if self.frame is not None else None
+        
+    def stop(self):
+        self.stopped = True
+        self.cap.release()
+
 def main():
     # PATH ENGINE: Pastikan file yolov8n_fp16.engine ada di folder yang sama
     ENGINE_PATH = "yolov8n_416_fp16.engine"
@@ -42,24 +73,19 @@ def main():
     print("[INFO] Model siap digunakan.")
 
     # Inisialisasi Kamera (0 untuk USB Webcam standar)
-    cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
-    
-    # Paksa format kompresi MJPG (mengurangi beban decoding bandwidth memori)
-    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-    
-    # Paksa resolusi hardware kamera diturunkan ke ukuran standar ringan
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    
-    if not cap.isOpened():
-        print("[ERROR] Kamera tidak terdeteksi. Pastikan kamera terpasang.")
+    print("Menyalakan Thread Kamera...")
+    stream = CameraStream(0).start
+    time.sleep(1.0)
+
+    if not stream.ret:
+        print('Kamera not Detected')
         return
 
     print("[INFO] Memulai inferensi real-time. Tekan 'q' untuk keluar.")
     
     while True:
         start_time = time.time()
-        ret, frame = cap.read()
+        ret, frame = stream.read()
         if not ret: 
             break
 
@@ -160,7 +186,7 @@ def main():
             break
 
     # Bersihkan memori kamera dan tutup jendela GUI
-    cap.release()
+    stream.stop()
     cv2.destroyAllWindows()
 
 if __name__ == '__main__':

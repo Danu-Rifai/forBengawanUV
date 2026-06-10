@@ -169,6 +169,9 @@ def main():
     cv2.destroyAllWindows()
 
 if __name__ == '__main__':
+<<<<<<< HEAD
     main()
 if __name__ == '__main__':
+=======
+>>>>>>> 23d6efc06cca0eba644ef988745dd9514fbbb2b0
     main()

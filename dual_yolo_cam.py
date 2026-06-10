@@ -123,7 +123,7 @@ def process_and_infer(frame, context, inputs, outputs, bindings, stream):
     return frame
 
 def main():
-    ENGINE_PATH = "yolo11n_fp16.engine"
+    ENGINE_PATH = "yolov8n_416_fp16.engine"
     
     print("[INFO] Memuat model TensorRT ke VRAM GPU...")
     engine = load_engine(ENGINE_PATH)

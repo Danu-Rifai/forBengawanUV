@@ -5,6 +5,9 @@ import pycuda.driver as cuda
 import pycuda.autoinit
 import threading
 import time
+from pyzbar.pyzbar import decode
+
+last_data_detected = None
 
 # 80 Kelas standar COCO Dataset
 CLASSES = ["person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch", "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"]
@@ -149,22 +152,26 @@ def main():
         # Ambil frame secara paralel dari kedua thread
         ret1, frame1 = cam1.read()
         ret2, frame2 = cam2.read()
+
+        # barcode scan
+        barcodes = decode(frame2)
         
         if not ret1 or not ret2: 
             break
 
         # --- EKSEKUSI SEKUENSIAL DENGAN BUFFER GPU YANG SAMA ---
         frame1_out = process_and_infer(frame1, context, inputs, outputs, bindings, stream)
-        frame2_out = process_and_infer(frame2, context, inputs, outputs, bindings, stream)
+        frame2_out = frame2
 
         # --- OPTIMASI RENDER UI ---
         # Gabungkan kedua frame secara horizontal agar hanya butuh satu instance cv2.imshow
-        combined_frame = cv2.hconcat([frame1_out, frame2_out])
 
         fps = 1.0 / (time.time() - start_time)
-        cv2.putText(combined_frame, f"Total FPS: {fps:.1f} (Dual Cam)", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        cv2.putText(frame1_out, f"Total FPS: {fps:.1f} (Cam One)", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        cv2.putText(frame2_out, f"Total FPS: {fps:.1f} (Cam Two)", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
 
-        cv2.imshow("Dual YOLOv8 TensorRT", combined_frame)
+        cv2.imshow("Cam 1", frame1_out)
+        cv2.imshow("Cam 2", frame2_out)
         
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break

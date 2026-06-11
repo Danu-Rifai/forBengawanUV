@@ -125,6 +125,50 @@ def process_and_infer(frame, context, inputs, outputs, bindings, stream):
             
     return frame
 
+class QRScanner:
+    def __init__(self, scan_fps=10):
+        self.frame = None
+        self.barcodes = []
+        self.stopped = False
+        self.lock = threading.Lock()
+        self.delay = 1.0 / scan_fps
+
+    def start(self):
+        threading.Thread(target=self.update, daemon=True).start()
+        return self
+
+    def update(self):
+        while not self.stopped:
+            if self.frame is not None:
+                # Ambil frame dengan aman
+                with self.lock:
+                    frame_to_scan = self.frame.copy()
+                
+                # OPTIMASI: Konversi Grayscale & Resize 50%
+                gray = cv2.cvtColor(frame_to_scan, cv2.COLOR_BGR2GRAY)
+                small_gray = cv2.resize(gray, (0, 0), fx=0.5, fy=0.5)
+                
+                # Eksekusi Pyzbar (Berjalan di background, tidak memblokir YOLO)
+                results = decode(small_gray)
+                
+                # Update hasil
+                with self.lock:
+                    self.barcodes = results
+            
+            # OPTIMASI: Throttling untuk mencegah CPU Overload
+            time.sleep(self.delay)
+
+    def set_frame(self, frame):
+        with self.lock:
+            self.frame = frame
+
+    def get_barcodes(self):
+        with self.lock:
+            return self.barcodes
+
+    def stop(self):
+        self.stopped = True
+
 def main():
     ENGINE_PATH = "yolov8n_416_fp16.engine"
     
@@ -143,6 +187,8 @@ def main():
     if not cam1.ret or not cam2.ret:
         print('[ERROR] Salah satu atau kedua kamera tidak terdeteksi. Cek koneksi USB/CSI.')
         return
+    
+    qr_scanner = QRScanner(10).start()
 
     print("[INFO] Memulai inferensi real-time dual camera. Tekan 'q' untuk keluar.")
     
@@ -154,10 +200,26 @@ def main():
         ret2, frame2 = cam2.read()
 
         # barcode scan
-        barcodes = decode(frame2)
         
         if not ret1 or not ret2: 
             break
+
+        qr_scanner.set_frame(frame1)
+        qr_scanner.set_frame(frame2)
+
+        barcodes = qr_scanner.get_barcodes()
+
+        for barcode in barcodes:
+            # Karena frame di-resize 50% di scanner, kalikan kordinat polygon dengan 2
+            points = barcode.polygon
+            if len(points) == 4:
+                pts = np.array([[p.x * 2, p.y * 2] for p in points], np.int32)
+                pts = pts.reshape((-1, 1, 2))
+                cv2.polylines(frame2_out, [pts], True, (255, 0, 0), 2)
+            
+            barcode_data = barcode.data.decode("utf-8")
+            x, y, w, h = barcode.rect
+            cv2.putText(frame2_out, barcode_data, (x*2, (y*2)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
 
         # --- EKSEKUSI SEKUENSIAL DENGAN BUFFER GPU YANG SAMA ---
         frame1_out = process_and_infer(frame1, context, inputs, outputs, bindings, stream)
@@ -176,6 +238,7 @@ def main():
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
+    qr_scanner.stop()
     cam1.stop()
     cam2.stop()
     cv2.destroyAllWindows()
